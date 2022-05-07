@@ -204,7 +204,7 @@ if __name__ == "__main__":
     parser.add_argument('--root-power', type=float, help='Histogram stretch factor')
     parser.add_argument('--no-clean', dest='clean', action='store_false')
     parser.add_argument('--no-register', dest='register', action='store_false')
-    parser.set_defaults(register=True, clean=True, root_power=6.)
+    parser.set_defaults(register=True, clean=True, root_power=.6)
 
     args = parser.parse_args()
     filenames = args.images
