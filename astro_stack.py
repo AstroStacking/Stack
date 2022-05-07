@@ -7,7 +7,7 @@ import numpy as np
 import scipy as sp
 from PIL import Image
 import skimage
-import sklearn
+import sklearn.linear_model
 import astropy.stats
 
 def estimateLightPollution(img):
@@ -17,7 +17,7 @@ def estimateLightPollution(img):
     xv, yv = np.meshgrid(np.arange(0, img.shape[0]), np.arange(0, img.shape[1]), indexing='xy')
     X = np.array((xv.reshape(-1), yv.reshape(-1))).T
     y = img.reshape(-1, 3)
-    reg = Lasso().fit(X, y)
+    reg = sklearn.linear_model.Lasso().fit(X, y)
     return reg.predict(X).reshape(img.shape)
 
 def removeLightPollution(img):
@@ -37,7 +37,7 @@ def findStars(img):
     properties = skimage.measure.regionprops(labels)
     return np.array([property.centroid[::-1] for property in properties])
 
-def match_locations(img0, img1, coords0, coords1, radius=5, sigma=3):
+def match_locations(img0, img1, coords0, coords1, radius=5, sigma=3, distance=10):
     """Match image locations using SSD minimization.
 
     Areas from `img0` are matched with areas from `img1`. These areas
@@ -69,16 +69,16 @@ def match_locations(img0, img1, coords0, coords1, radius=5, sigma=3):
     weights /= 2 * np.pi * sigma * sigma
 
     match_list = []
-    for c0, r0 in coords0.astype(np.int16):
+    for (c0, r0), coord0 in zip(coords0.astype(np.int16), coords0):
         roi0 = img0[r0 - radius:r0 + radius + 1, c0 - radius:c0 + radius + 1]
         if roi0.shape != (2*radius+1, 2*radius+1):
             match_list.append((-1, -1))
             continue
-        roi1_list = [img1[r1 - radius:r1 + radius + 1,
-                          c1 - radius:c1 + radius + 1] for c1, r1 in coords1.astype(np.int16)]
+        roi1_list = [(img1[r1 - radius:r1 + radius + 1,
+                          c1 - radius:c1 + radius + 1], coords1) for (c1, r1), coords1 in zip(coords1.astype(np.int16), coords1)]
 
         # sum of squared differences
-        ssd_list = [np.sum(weights * (roi0 - roi1) ** 2) if roi0.shape == roi1.shape else 10000000 for roi1 in roi1_list]
+        ssd_list = [np.sum(weights * (roi0 - roi1[0]) ** 2) * np.exp(np.sum((coord0 - roi1[1])**2) / distance) if roi0.shape == roi1[0].shape else 10000000 for roi1 in roi1_list]
         match_list.append(coords1[np.argmin(ssd_list)])
 
     return np.array(match_list)
@@ -195,13 +195,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Stack Astrophotography')
     parser.add_argument('images', type=str, nargs='+', help='images to stack')
-    parser.add_argument('--output', type=str, required=True, help='Output image name')
     parser.add_argument('--unwrapped-output', type=str, help='Unwrapped image name')
     parser.add_argument('--pollution-output', type=str, help='Output image name')
     parser.add_argument('--registration-output', type=str, help='Output image name')
     parser.add_argument('--max-output', type=str, help='Output image name')
-    parser.add_argument('--prestretch-output', type=str, help='Output image name before histogram stretching')
-    parser.add_argument('--root-power', type=float, help='Histogram stretch factor')
+    parser.add_argument('--average-output', type=str, help='Output image name')
     parser.add_argument('--no-clean', dest='clean', action='store_false')
     parser.add_argument('--no-register', dest='register', action='store_false')
     parser.set_defaults(register=True, clean=True, root_power=.6)
@@ -244,19 +242,15 @@ if __name__ == "__main__":
         logging.info(f"Saving max file {args.max_output}")
         skimage.io.imsave(args.max_output, (max * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
 
-    logging.info(f"Sigma clipping channel 1")
-    average0 = astropy.stats.sigma_clipped_stats(imgs[:,:,:,0].reshape(len(imgs), -1), axis=0)
-    logging.info(f"Sigma clipping channel 2")
-    average1 = astropy.stats.sigma_clipped_stats(imgs[:,:,:,1].reshape(len(imgs), -1), axis=0)
-    logging.info(f"Sigma clipping channel 3")
-    average2 = astropy.stats.sigma_clipped_stats(imgs[:,:,:,2].reshape(len(imgs), -1), axis=0)
-    average = np.column_stack((average0[1], average1[1], average2[1])).reshape(shape)
+    if args.average_output:
+        logging.info(f"Sigma clipping channel 1")
+        average0 = astropy.stats.sigma_clipped_stats(imgs[:,:,:,0].reshape(len(imgs), -1), axis=0)
+        logging.info(f"Sigma clipping channel 2")
+        average1 = astropy.stats.sigma_clipped_stats(imgs[:,:,:,1].reshape(len(imgs), -1), axis=0)
+        logging.info(f"Sigma clipping channel 3")
+        average2 = astropy.stats.sigma_clipped_stats(imgs[:,:,:,2].reshape(len(imgs), -1), axis=0)
+        average = np.column_stack((average0[1], average1[1], average2[1])).reshape(shape)
     
-    if args.prestretch_output:
-        logging.info(f"Saving pre stretch file {args.prestretch_output}")
-        skimage.io.imsave(args.prestretch_output, (average * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+        logging.info(f"Saving pre stretch file {args.average_output}")
+        skimage.io.imsave(args.average_output, (average * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
 
-    average = np.power(average, args.root_power)
-
-    logging.info(f"Saving output file {args.output}")
-    skimage.io.imsave(args.output, (average * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
