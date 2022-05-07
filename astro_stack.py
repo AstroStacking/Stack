@@ -95,13 +95,16 @@ def findSkimageRegistration(stars, stars1_matched, shape):
     return model_robust.inverse
 
 def enhanceCoords(coords, shape):
-    return np.column_stack([coords, coords[:,1]*np.cos(2*np.pi/shape[0]*coords[:,0]), coords[:,0]*np.cos(2*np.pi/shape[1]*coords[:,1]), coords[:,1]*2*np.sin(np.pi/shape[0]*coords[:,0]), coords[:,0]*2*np.sin(np.pi/shape[1]*coords[:,1])])
+    return np.column_stack([coords, coords[:,1]*np.cos(np.pi/shape[0]*coords[:,0]), coords[:,0]*np.cos(np.pi/shape[1]*coords[:,1]), coords[:,1]*np.sin(np.pi/shape[0]*coords[:,0]), coords[:,0]*np.sin(np.pi/shape[1]*coords[:,1])])
 
-def enhanceCoords(coords, shape):
-    return coords
+#def enhanceCoords(coords, shape):
+#    return np.column_stack([coords, np.cos(np.pi/shape[0]*coords[:,0]), np.cos(np.pi/shape[1]*coords[:,1]), np.sin(np.pi/shape[0]*coords[:,0]), np.sin(np.pi/shape[1]*coords[:,1])])
+
+#def enhanceCoords(coords, shape):
+#    return coords
 
 def findSkLearnRegistration(stars, stars1_matched, shape):
-    model = sklearn.linear_model.RANSACRegressor(min_samples=30, residual_threshold=100)
+    model = sklearn.linear_model.RANSACRegressor(min_samples=30, residual_threshold=10)
     model.fit(enhanceCoords(stars, shape), stars1_matched)
     logging.info(
       f"Translation: ({model.estimator_.intercept_}), "
