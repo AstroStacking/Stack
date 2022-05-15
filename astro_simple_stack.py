@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# -*- coding: utf-8 -*-
-import glob
-import sys
-
 import numpy as np
 from PIL import Image
 import skimage
 
 def readFiles(images):
-    loaded = [np.asarray(Image.open(img)) for img in images]
-    return np.array(loaded)
+    imgs = [Image.open(filename) for filename in filenames]
+    imgs = [np.asarray(img) / np.iinfo(np.asarray(img).dtype).max for img in imgs]
+    return imgs
 
 if __name__ == "__main__":
     import argparse
     import os
     
-    logging.basicConfig(level=logging.INFO)
-
     parser = argparse.ArgumentParser(description='Stack Astrophotography')
     parser.add_argument('images', type=str, nargs='+', help='images to stack')
     parser.add_argument('--output', type=str, help='Output image name')
