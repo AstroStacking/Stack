@@ -5,7 +5,6 @@ This is a collection of astrophotography scripts.
 ## Scripts
 
 * **astro_stack.py** takes a list of images in parameters and stacks them together.
-* **astro_process.py** does the last processing of a stacked image if you want to change parameters
 
 ## Future
 
