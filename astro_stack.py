@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import math
 
 import numpy as np
 import scipy as sp
@@ -9,6 +10,10 @@ from PIL import Image
 import skimage
 import sklearn.linear_model
 import astropy.stats
+from matplotlib import pyplot as plt
+
+MAX_STARS = 100
+MIN_STARS = 80
 
 def estimateLightPollution(img):
     """
@@ -22,69 +27,102 @@ def estimateLightPollution(img):
 
 def removeLightPollution(img):
     removed_light = img - estimateLightPollution(img)
-    min = np.min(np.min(removed_light, axis=0), axis=0)
-    return np.clip(removed_light - min, 0, 1)
+    return np.clip(removed_light, 0, 1)
 
-def findStars(img):
+def findStars(img, filename):
     """
     Find stars on an image and return an array of possible stars
     """
-    filtered_img = skimage.filters.gaussian(img, sigma=2, channel_axis=2)
-    gray_img = skimage.color.rgb2gray(filtered_img)
-    thresh_img = skimage.filters.threshold_otsu(gray_img)
-    binary_img = gray_img > thresh_img
-    labels = skimage.measure.label(binary_img, connectivity=2)
-    properties = skimage.measure.regionprops(labels)
-    return np.array([property.centroid[::-1] for property in properties])
+    gray_img = skimage.color.rgb2gray(img)
+    filtered_img = skimage.filters.gaussian(gray_img, sigma=10)
+    thresh_fix = 1
+    while True:
+        thresh = skimage.filters.threshold_otsu(filtered_img)
+        binary_img = filtered_img > thresh * thresh_fix
+        labels = skimage.measure.label(binary_img, connectivity=2)
+        properties = skimage.measure.regionprops(labels)
+        if len(properties) > MAX_STARS:
+            thresh_fix = thresh_fix * 1.1
+        elif len(properties) < MIN_STARS:
+            thresh_fix = thresh_fix * .95
+        else:
+            break
+    properties.sort(key=lambda property: property.area, reverse=True)
+    data = np.array([property.centroid[::-1] for property in properties])
+    skimage.io.imsave(f"thres_{filename}", (binary_img * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+    np.savetxt(f"thres_{filename}.txt", data, delimiter=",")
+    return data
 
-def match_locations(img0, img1, coords0, coords1, radius=5, sigma=3, distance=10):
-    """Match image locations using SSD minimization.
+def generatePotentialMatch(nbElements, fullRange):
+    l = [0] * nbElements
+    while True:
+        inRange = False
+        for i in range(nbElements):
+            l[i] = l[i] + 1
+            if l[i] == fullRange:
+                l[i] = 0
+            else:
+                inRange = True
+                break
+        if inRange:
+            yield l
+        else:
+            break
 
-    Areas from `img0` are matched with areas from `img1`. These areas
-    are defined as patches located around pixels with Gaussian
-    weights.
-
-    Parameters:
-    -----------
-    img0, img1 : 2D array
-        Input images.
-    coords0 : (2, m) array_like
-        Centers of the reference patches in `img0`.
-    coords1 : (2, n) array_like
-        Centers of the candidate patches in `img1`.
-    radius : int
-        Radius of the considered patches.
-    sigma : float
-        Standard deviation of the Gaussian kernel centered over the patches.
-
-    Returns:
-    --------
-    match_coords: (2, m) array
-        The points in `coords1` that are the closest corresponding matches to
-        those in `coords0` as determined by the (Gaussian weighted) sum of
-        squared differences between patches surrounding each point.
-    """
-    y, x = np.mgrid[-radius:radius + 1, -radius:radius + 1]
-    weights = np.exp(-0.5 * (x ** 2 + y ** 2) / sigma ** 2)
-    weights /= 2 * np.pi * sigma * sigma
-
-    match_list = []
-    for (c0, r0), coord0 in zip(coords0.astype(np.int16), coords0):
-        roi0 = img0[r0 - radius:r0 + radius + 1, c0 - radius:c0 + radius + 1]
-        if roi0.shape != (2*radius+1, 2*radius+1):
-            match_list.append((-1, -1))
+def matchGraph(coords0, coords1):
+    dist0 = sp.spatial.distance_matrix(coords0, coords0)
+    dist1 = sp.spatial.distance_matrix(coords1, coords1)
+    
+    for trial in generatePotentialMatch(len(coords0), len(coords1)):
+        if len(set(trial)) != len(coords0):
             continue
-        roi1_list = [(img1[r1 - radius:r1 + radius + 1,
-                          c1 - radius:c1 + radius + 1], coords1) for (c1, r1), coords1 in zip(coords1.astype(np.int16), coords1)]
+        d = dist1[trial]
+        d = d[:, trial]
+        ratio = dist0 / d
+        ok = True
+        for i in range(1, len(coords0)):
+            for j in range(i+1, len(coords0)):
+                if ratio[i, j] > 1.1 or ratio[i, j] < 0.9:
+                    ok = False
+        if ok:
+            return [(i, j) for i, j in enumerate(trial)]
 
-        # sum of squared differences
-        ssd_list = [np.sum(weights * (roi0 - roi1[0]) ** 2) * np.exp(np.sum((coord0 - roi1[1])**2) / distance) if roi0.shape == roi1[0].shape else 10000000 for roi1 in roi1_list]
-        match_list.append(coords1[np.argmin(ssd_list)])
+    return []
 
-    return np.array(match_list)
+def matchLocations(img0, img1, coords0, coords1, minFullGraph=5):
+    
+    mainGraph = matchGraph(coords0[:minFullGraph], coords1[:minFullGraph*2])
+    matchList = [i for i, j in mainGraph], [j for i, j in mainGraph]
+    
+    matchSet = set(matchList[1])
+
+    for i in range(minFullGraph, len(coords0)):
+        dist0 = sp.spatial.distance_matrix(coords0[i, :][None, :], coords0[matchList[0]])
+        for j in range(0, len(coords1)):
+            if j in matchSet:
+                continue
+            dist1 = sp.spatial.distance_matrix(coords1[j, :][None, :], coords1[matchList[1]])
+            ratio = dist0/dist1
+            if np.all(ratio < 1.1) and np.all(ratio > 0.9):
+                matchList[0].append(i)
+                matchList[1].append(j)
+                matchSet.add(j)
+                break
+
+    return np.array([[coords0[m] for m in matchList[0]], [coords1[m] for m in matchList[1]]])
+
+def saveMatch(img, stars, stars_ref, match, filename):
+    plt.figure(figsize=(6, 6))
+    plt.imshow(img)
+    plt.plot(stars[:, 0], stars[:, 1], "xr", markersize=4)
+    plt.plot(stars_ref[:, 0], stars_ref[:, 1], "xb", markersize=4)
+    for i in range(len(match[0])):
+        plt.plot([match[0][i, 0], match[1][i, 0]], [match[0][i, 1], match[1][i, 1]], "-g")
+    plt.savefig(f"{filename}.png")
+    plt.close()
 
 def findSkimageRegistration(stars, stars1_matched, shape):
-    model_robust, inliers = skimage.measure.ransac((stars, stars1_matched), skimage.transform.SimilarityTransform, min_samples=30, residual_threshold=10, max_trials=100)
+    model_robust, inliers = skimage.measure.ransac((stars, stars1_matched), skimage.transform.SimilarityTransform, min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=100)
     """f'Scale: ({model_robust.scale[0]:.4f}, {model_robust.scale[1]:.4f}), '"""
     logging.info(
       f"Translation: ({model_robust.translation[0]:.4f}, "
@@ -100,11 +138,11 @@ def enhanceCoords(coords, shape):
 #def enhanceCoords(coords, shape):
 #    return np.column_stack([coords, np.cos(np.pi/shape[0]*coords[:,0]), np.cos(np.pi/shape[1]*coords[:,1]), np.sin(np.pi/shape[0]*coords[:,0]), np.sin(np.pi/shape[1]*coords[:,1])])
 
-#def enhanceCoords(coords, shape):
-#    return coords
+def enhanceCoords(coords, shape):
+    return coords
 
 def findSkLearnRegistration(stars, stars1_matched, shape):
-    model = sklearn.linear_model.RANSACRegressor(min_samples=30, residual_threshold=10)
+    model = sklearn.linear_model.RANSACRegressor(min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=1000)
     model.fit(enhanceCoords(stars, shape), stars1_matched)
     logging.info(
       f"Translation: ({model.estimator_.intercept_}), "
@@ -131,7 +169,7 @@ def applyMultipleTransforms(transforms):
 def cleanImgs(imgs, filenames):
     cleaned_imgs = []
     for i in range(len(filenames)):
-        logging.info(f"Cleaning up images {filenames[i]}")
+        logging.info(f"Cleaning up image {filenames[i]}")
         cleaned = removeLightPollution(imgs[i])
         cleaned_imgs.append(cleaned)
     return cleaned_imgs
@@ -141,7 +179,8 @@ def warpImgs(imgs, filenames):
     stars = []
     for i in range(len(filenames)):
         logging.info(f"Finding stars for {filenames[i]}")
-        star = findStars(imgs[i])
+        star = findStars(imgs[i], filenames[i])
+        logging.info(f"Found: {len(star)}")
         stars.append(star)
 
     grays = []
@@ -153,9 +192,9 @@ def warpImgs(imgs, filenames):
     models_forward = []
     for i in range(middle):
         logging.info(f"Registering {filenames[i]} to {filenames[i+1]}")
-        stars_matched = match_locations(grays[i+1], grays[i], stars[i+1], stars[i])
-        outlier_idxs = np.nonzero(stars_matched != 0)[0]
-        model = findRegistration(stars[i+1], stars_matched, grays[middle].shape)
+        stars_matched = matchLocations(grays[i+1], grays[i], stars[i+1], stars[i])
+        saveMatch(imgs[i], stars[i+1], stars[i], stars_matched, filenames[i])
+        model = findRegistration(stars_matched[0], stars_matched[1], grays[middle].shape)
         models_forward.append([model])
 
     for i in range(1, len(models_forward)):
@@ -164,9 +203,9 @@ def warpImgs(imgs, filenames):
     models_backward = []
     for i in range(middle+1, len(filenames)):
         logging.info(f"Registering {filenames[i]} to {filenames[i-1]}")
-        stars_matched = match_locations(grays[i-1], grays[i], stars[i-1], stars[i])
-        outlier_idxs = np.nonzero(stars_matched != 0)[0]
-        model = findRegistration(stars[i-1], stars_matched, grays[middle].shape)
+        stars_matched = matchLocations(grays[i-1], grays[i], stars[i-1], stars[i])
+        saveMatch(imgs[i], stars[i-1], stars[i], stars_matched, filenames[i])
+        model = findRegistration(stars_matched[0], stars_matched[1], grays[middle].shape)
         models_backward.append([model])
 
     for i in range(1, len(models_backward)):
