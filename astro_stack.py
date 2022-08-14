@@ -48,7 +48,7 @@ def findStars(img, filename):
         else:
             break
     properties.sort(key=lambda property: property.area, reverse=True)
-    data = np.array([property.centroid[::-1] for property in properties])
+    data = np.array([property.centroid[::-1] for property in properties if property.axis_minor_length > 0 and property.axis_major_length / property.axis_minor_length < 5])
     skimage.io.imsave(f"thres_{filename}", (binary_img * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
     np.savetxt(f"thres_{filename}.txt", data, delimiter=",")
     return data
@@ -90,8 +90,11 @@ def matchGraph(coords0, coords1):
     return []
 
 def matchLocations(img0, img1, coords0, coords1, minFullGraph=5):
-    
-    mainGraph = matchGraph(coords0[:minFullGraph], coords1[:minFullGraph*2])
+
+    for i in range(minFullGraph):
+        mainGraph = matchGraph(coords0[i:i+minFullGraph], coords1[:minFullGraph*2])
+        if len(mainGraph) != 0:
+            break
     matchList = [i for i, j in mainGraph], [j for i, j in mainGraph]
     
     matchSet = set(matchList[1])
@@ -191,25 +194,19 @@ def warpImgs(imgs, filenames):
     
     models_forward = []
     for i in range(middle):
-        logging.info(f"Registering {filenames[i]} to {filenames[i+1]}")
-        stars_matched = matchLocations(grays[i+1], grays[i], stars[i+1], stars[i])
-        saveMatch(imgs[i], stars[i+1], stars[i], stars_matched, filenames[i])
+        logging.info(f"Registering {filenames[i]} to {filenames[middle]}")
+        stars_matched = matchLocations(grays[middle], grays[i], stars[middle], stars[i])
+        saveMatch(imgs[i], stars[middle], stars[i], stars_matched, filenames[i])
         model = findRegistration(stars_matched[0], stars_matched[1], grays[middle].shape)
         models_forward.append([model])
 
-    for i in range(1, len(models_forward)):
-        models_forward[len(models_forward)-i-1].extend(models_forward[len(models_forward)-i])
-
     models_backward = []
     for i in range(middle+1, len(filenames)):
-        logging.info(f"Registering {filenames[i]} to {filenames[i-1]}")
-        stars_matched = matchLocations(grays[i-1], grays[i], stars[i-1], stars[i])
-        saveMatch(imgs[i], stars[i-1], stars[i], stars_matched, filenames[i])
+        logging.info(f"Registering {filenames[i]} to {filenames[middle]}")
+        stars_matched = matchLocations(grays[middle], grays[i], stars[middle], stars[i])
+        saveMatch(imgs[i], stars[middle], stars[i], stars_matched, filenames[i])
         model = findRegistration(stars_matched[0], stars_matched[1], grays[middle].shape)
         models_backward.append([model])
-
-    for i in range(1, len(models_backward)):
-        models_backward[i].extend(models_backward[i-1])
         
     del grays
     del stars
