@@ -36,7 +36,7 @@ class AstroStack:
             
         return data
     
-    def estimateLightPollution(self, img):
+    def estimate_light_pollution(self, img):
         """
         Estimate light pollution as a linear drop in the background
         """
@@ -46,11 +46,11 @@ class AstroStack:
         reg = sklearn.linear_model.Lasso().fit(X, y)
         return reg.predict(X).reshape(img.shape)
 
-    def removeLightPollution(self, img):
-        removed_light = img - self.estimateLightPollution(img)
+    def remove_light_pollution(self, img):
+        removed_light = img - self.estimate_light_pollution(img)
         return np.clip(removed_light, 0, 1)
 
-    def clean_imgs(imgs):
+    def clean_imgs(self, imgs):
         if not self.args.clean:
             return imgs
 
@@ -58,7 +58,7 @@ class AstroStack:
         cleaned_imgs = grp.create_dataset("imgs", imgs.shape)
         for i in range(len(self.args.images)):
             self.logger.info(f"Cleaning up image {self.args.images[i]}")
-            cleaned = self.removeLightPollution(imgs[i])
+            cleaned = self.remove_light_pollution(imgs[i])
             cleaned_imgs[i] = cleaned
 
         if self.args.pollution_output:
@@ -68,7 +68,7 @@ class AstroStack:
                 
         return cleaned_imgs
 
-    def findStars(self, img, filename):
+    def find_stars(self, img, filename):
         """
         Find stars on an image and return an array of possible stars
         """
@@ -90,7 +90,7 @@ class AstroStack:
         data = np.array([property.centroid[::-1] for property in properties if property.axis_minor_length > 0 and property.axis_major_length / property.axis_minor_length < 5])
         return data
 
-    def generatePotentialMatch(self, nbElements, fullRange):
+    def generate_potential_match(self, nbElements, fullRange):
         l = [0] * nbElements
         while True:
             inRange = False
@@ -106,30 +106,60 @@ class AstroStack:
             else:
                 break
 
-    def matchGraph(self, coords0, coords1):
+    def match_graph(self, coords0, coords1):
         dist0 = sp.spatial.distance_matrix(coords0, coords0)
         dist1 = sp.spatial.distance_matrix(coords1, coords1)
+        best = 1
+        bestTrial = []
         
-        for trial in self.generatePotentialMatch(len(coords0), len(coords1)):
+        for trial in self.generate_potential_match(len(coords0), len(coords1)):
             if len(set(trial)) != len(coords0):
                 continue
             d = dist1[trial]
             d = d[:, trial]
             ratio = dist0 / d
-            ok = True
-            for i in range(1, len(coords0)):
-                for j in range(i+1, len(coords0)):
-                    if ratio[i, j] > 1.1 or ratio[i, j] < 0.9:
-                        ok = False
-            if ok:
-                return [(i, j) for i, j in enumerate(trial)]
+            candidate = np.nanmax(np.abs(ratio-1))
+            if candidate < best:
+                best = candidate
+                bestTrial = [(i, j) for i, j in enumerate(trial)]
 
-        return []
+        return bestTrial
 
-    def matchLocations(self, img0, img1, coords0, coords1, minFullGraph=5):
+    def save_match(self, img, stars, stars_ref, match, filename):
+        plt.figure(figsize=(6, 6))
+        plt.imshow(img)
+        plt.plot(stars[:, 0], stars[:, 1], "xr", markersize=4)
+        plt.plot(stars_ref[:, 0], stars_ref[:, 1], "xb", markersize=4)
+        for i in range(len(match[0])):
+            plt.plot([match[0][i, 0], match[1][i, 0]], [match[0][i, 1], match[1][i, 1]], "-g")
+        plt.savefig(f"{filename}.png")
+        plt.close()
+    
+    def save_graph(self, img, stars, graph, stars_ref, graph_ref, filename):
+        from scipy.spatial import KDTree
+        interesting_stars = stars[graph]
+        interesting_stars_ref = stars_ref[graph_ref]
+        tree = KDTree(interesting_stars)
+        tree_ref = KDTree(interesting_stars_ref)
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(img)
+        plt.plot(stars[:, 0], stars[:, 1], "xr", markersize=4)
+        for i in range(len(graph)):
+            data, indices = tree.query(interesting_stars[i], k=3)
+            for index in indices:
+                plt.plot([interesting_stars[i, 0], interesting_stars[index, 0]], [interesting_stars[i, 1], interesting_stars[index, 1]], "-b")
+        for i in range(len(graph_ref)):
+            data, indices = tree_ref.query(interesting_stars_ref[i], k=3)
+            for index in indices:
+                plt.plot([interesting_stars_ref[i, 0], interesting_stars_ref[index, 0]], [interesting_stars_ref[i, 1], interesting_stars_ref[index, 1]], "-g")
+        plt.savefig(f"graph_{filename}.png")
+        plt.close()
+
+    def match_locations(self, img, coords0, coords1, minFullGraph, filename):
 
         for i in range(minFullGraph):
-            mainGraph = self.matchGraph(coords0[i:i+minFullGraph], coords1[:minFullGraph*2])
+            mainGraph = self.match_graph(coords0[i:i+minFullGraph], coords1[:minFullGraph*2])
             if len(mainGraph) != 0:
                 break
         matchList = [i for i, j in mainGraph], [j for i, j in mainGraph]
@@ -149,9 +179,10 @@ class AstroStack:
                     matchSet.add(j)
                     break
 
+        self.save_graph(img, coords0, matchList[0], coords1, matchList[1], filename)
         return np.array([[coords0[m] for m in matchList[0]], [coords1[m] for m in matchList[1]]])
 
-    def findSkimageRegistration(self, stars, stars1_matched, shape):
+    def find_skimage_registration(self, stars, stars1_matched, shape):
         model_robust, inliers = skimage.measure.ransac((stars, stars1_matched), skimage.transform.SimilarityTransform, min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=100)
         """f'Scale: ({model_robust.scale[0]:.4f}, {model_robust.scale[1]:.4f}), '"""
         self.logger.info(
@@ -162,31 +193,31 @@ class AstroStack:
           )
         return model_robust.inverse
 
-    def enhanceCoords(self, coords, shape):
+    def enhance_coords(self, coords, shape):
         return np.column_stack([coords, coords[:,1]*np.cos(np.pi/shape[0]*coords[:,0]), coords[:,0]*np.cos(np.pi/shape[1]*coords[:,1]), coords[:,1]*np.sin(np.pi/shape[0]*coords[:,0]), coords[:,0]*np.sin(np.pi/shape[1]*coords[:,1])])
 
-    #def enhanceCoords(self, coords, shape):
-    #    return np.column_stack([coords, np.cos(np.pi/shape[0]*coords[:,0]), np.cos(np.pi/shape[1]*coords[:,1]), np.sin(np.pi/shape[0]*coords[:,0]), np.sin(np.pi/shape[1]*coords[:,1])])
+    def enhance_coords(self, coords, shape):
+        return np.column_stack([coords, np.cos(np.pi/shape[0]*coords[:,0]), np.cos(np.pi/shape[1]*coords[:,1]), np.sin(np.pi/shape[0]*coords[:,0]), np.sin(np.pi/shape[1]*coords[:,1])])
 
-    def enhanceCoords(self, coords, shape):
+    def enhance_coords(self, coords, shape):
         return coords
 
-    def findSkLearnRegistration(self, stars, stars1_matched, shape):
+    def find_sklearn_registration(self, stars, stars1_matched, shape):
         model = sklearn.linear_model.RANSACRegressor(min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=1000)
-        model.fit(self.enhanceCoords(stars, shape), stars1_matched)
+        model.fit(self.enhance_coords(stars, shape), stars1_matched)
         self.logger.info(
           f"Translation: ({model.estimator_.intercept_}), "
           f"Coeffs: {model.estimator_.coef_}, "
           f"Inliers: {np.count_nonzero(model.inlier_mask_)}/{len(model.inlier_mask_)}"
           )
         def predict(coords):
-            return model.predict(self.enhanceCoords(coords, shape))
+            return model.predict(self.enhance_coords(coords, shape))
         return predict
 
-    #findRegistration = findSkimageRegistration
-    findRegistration = findSkLearnRegistration
+    #find_registration = find_skimage_registration
+    find_registration = find_sklearn_registration
 
-    def warpImgs(self, imgs):
+    def warp_imgs(self, imgs):
         middle = len(self.args.images) // 2
 
         register = self.hdf5.require_group("/register")
@@ -195,7 +226,7 @@ class AstroStack:
         grays = self.hdf5.require_group("/register/grays")
         for i in range(len(self.args.images)):
             self.logger.info(f"Finding stars for {self.args.images[i]}")
-            star = self.findStars(imgs[i], self.args.images[i])
+            star = self.find_stars(imgs[i], self.args.images[i])
             stars.create_dataset(self.args.images[i], star.shape, dtype=star.dtype)[:] = star
             self.logger.info(f"Found: {len(star)}")
             gray = skimage.color.rgb2gray(imgs[i])
@@ -206,17 +237,19 @@ class AstroStack:
         models_forward = []
         for i in range(middle):
             self.logger.info(f"Registering {self.args.images[i]} to {self.args.images[middle]}")
-            stars_matched = self.matchLocations(grays[self.args.images[middle]], grays[self.args.images[i]], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]))
+            stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
-            model = self.findRegistration(stars_matched[0], stars_matched[1], shape)
+            self.logger.info(f"Using {stars_matched.shape[1]} stars")
+            model = self.find_registration(stars_matched[0], stars_matched[1], shape)
             models_forward.append(model)
 
         models_backward = []
         for i in range(middle+1, len(self.args.images)):
             self.logger.info(f"Registering {self.args.images[i]} to {self.args.images[middle]}")
-            stars_matched = self.matchLocations(grays[self.args.images[middle]], grays[self.args.images[i]], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]))
+            stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
-            model = self.findRegistration(stars_matched[0], stars_matched[1], shape)
+            self.logger.info(f"Using {stars_matched.shape[1]} stars")
+            model = self.find_registration(stars_matched[0], stars_matched[1], shape)
             models_backward.append(model)
 
         warps = register.create_dataset("imgs", imgs.shape)
@@ -239,7 +272,7 @@ class AstroStack:
             self.logger.info(f"Saving unwrapped file {args.unwrapped_output}")
             unwrapped = np.max(imgs, axis=0)
             skimage.io.imsave(self.args.unwrapped_output, (unwrapped * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
-        imgs = self.warpImgs(imgs)
+        imgs = self.warp_imgs(imgs)
 
         if args.registration_output:
             for i in range(0, len(self.args.images)):
@@ -294,6 +327,7 @@ if __name__ == "__main__":
     parser.add_argument('--no-register', dest='register', action='store_false')
     parser.add_argument('--min-stars', type=int, default=80)
     parser.add_argument('--max-stars', type=int, default=100)
+    parser.add_argument('--full-graph', type=int, default=5)
 
     parser.add_argument('--max-output', type=str, help='Output image name')
     parser.add_argument('--average-output', type=str, help='Output image name')
