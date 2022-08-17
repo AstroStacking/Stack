@@ -12,6 +12,9 @@ import astropy.stats
 from matplotlib import pyplot as plt
 from tqdm.auto import trange
 
+def save(filename, data):
+    skimage.io.imsave(filename, (data * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile', check_contrast=False)
+
 class AstroStack:
     def __init__(self, args):
         import h5py
@@ -66,7 +69,7 @@ class AstroStack:
         if self.args.pollution_output:
             os.makedirs(self.args.pollution_output, exist_ok=True)
             for i in range(len(self.args.images)):
-                skimage.io.imsave(os.path.join(self.args.pollution_output, os.path.basename(self.args.images[i])), (cleaned_imgs[i] * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+                save(os.path.join(self.args.pollution_output, os.path.basename(self.args.images[i])), cleaned_imgs[i])
                 
         return cleaned_imgs
 
@@ -265,13 +268,13 @@ class AstroStack:
         if self.args.unwrapped_output:
             self.logger.info(f"Saving unwrapped file {args.unwrapped_output}")
             unwrapped = np.max(imgs, axis=0)
-            skimage.io.imsave(self.args.unwrapped_output, (unwrapped * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+            save(self.args.unwrapped_output, unwrapped)
         imgs = self.warp_imgs(imgs)
 
         if args.registration_output:
             for i in range(0, len(self.args.images)):
                 os.makedirs(self.args.registration_output, exist_ok=True)
-                skimage.io.imsave(os.path.join(self.args.registration_output, os.path.basename(self.args.images[i])), (imgs[i] * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+                save(os.path.join(self.args.registration_output, os.path.basename(self.args.images[i])), imgs[i])
         return imgs
 
     def __call__(self):
@@ -286,7 +289,7 @@ class AstroStack:
             self.logger.info(f"Computing max")
             max = np.max(imgs, axis=0)
             self.logger.info(f"Saving max file {args.max_output}")
-            skimage.io.imsave(self.args.max_output, (max * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+            save(self.args.max_output, max)
 
         if self.args.average_output:
             data = []
@@ -295,7 +298,7 @@ class AstroStack:
             average = np.column_stack(data).reshape(imgs.shape[1:])
         
             self.logger.info(f"Saving pre stretch file {args.average_output}")
-            skimage.io.imsave(self.args.average_output, (average * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile')
+            save(self.args.average_output, average)
 
         self.hdf5.close()
 
