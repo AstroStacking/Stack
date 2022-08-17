@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import logging
 import math
 
 import numpy as np
@@ -11,11 +10,12 @@ import skimage
 import sklearn.linear_model
 import astropy.stats
 from matplotlib import pyplot as plt
-import h5py
 from tqdm.auto import trange
 
 class AstroStack:
     def __init__(self, args):
+        import h5py
+
         self.args = args
         self.logger = logging.getLogger("AstroStack")
         
@@ -158,20 +158,20 @@ class AstroStack:
         plt.savefig(f"graph_{filename}.png")
         plt.close()
 
-    def match_locations(self, img, coords0, coords1, minFullGraph, filename):
-
+    def find_full_graph_match(self, coords0, coords1, minFullGraph):
         for i in range(minFullGraph):
             mainGraph = self.match_graph(coords0[i:i+minFullGraph], coords1[:minFullGraph*2])
             if len(mainGraph) != 0:
                 break
-        matchList = [i for i, j in mainGraph], [j for i, j in mainGraph]
-        
+        return [i for i, j in mainGraph], [j for i, j in mainGraph]
+
+    def find_partial_graph_match(self, matchList, coords0, coords1):
         matchSet = set(matchList[1])
 
         fulldist0 = sp.spatial.distance_matrix(coords0, coords0)
         fulldist1 = sp.spatial.distance_matrix(coords1, coords1)
 
-        for i in trange(minFullGraph, len(coords0), desc="Partial graph match"):
+        for i in trange(max(matchList[0]), len(coords0), desc="Partial graph match"):
             best = 1
             bestTrial = []
             
@@ -191,39 +191,33 @@ class AstroStack:
                 matchList[1].append(bestTrial[1])
                 matchSet.add(bestTrial[1])
 
+        return matchList
+
+    def match_locations(self, img, coords0, coords1, minFullGraph, filename):
+        matchList = self.find_full_graph_match(coords0, coords1, minFullGraph)
+        matchList = self.find_partial_graph_match(matchList, coords0, coords1)
+
         self.save_graph(img, coords1, matchList[1], coords0, matchList[0], filename)
         return np.array([[coords0[m] for m in matchList[0]], [coords1[m] for m in matchList[1]]])
 
-    def find_skimage_registration(self, stars, stars1_matched, shape):
+    def find_skimage_registration(self, stars, stars1_matched, shape, enhance_coords):
         model_robust, inliers = skimage.measure.ransac((stars, stars1_matched), skimage.transform.SimilarityTransform, min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=100)
-        """f'Scale: ({model_robust.scale[0]:.4f}, {model_robust.scale[1]:.4f}), '"""
-        self.logger.info(
-          f"Translation: ({model_robust.translation[0]:.4f}, "
-          f"{model_robust.translation[1]:.4f}), "
-          f"Rotation: {model_robust.rotation:.4f}, "
-          f"Inliers: {np.count_nonzero(inliers)}/{len(inliers)}"
-          )
         return model_robust.inverse
 
-    def enhance_coords(self, coords, shape):
+    def enhance_coords_full(self, coords, shape):
         return np.column_stack([coords, coords[:,1]*np.cos(np.pi/shape[0]*coords[:,0]), coords[:,0]*np.cos(np.pi/shape[1]*coords[:,1]), coords[:,1]*np.sin(np.pi/shape[0]*coords[:,0]), coords[:,0]*np.sin(np.pi/shape[1]*coords[:,1])])
 
-    def enhance_coords(self, coords, shape):
+    def enhance_coords_partial(self, coords, shape):
         return np.column_stack([coords, np.cos(np.pi/shape[0]*coords[:,0]), np.cos(np.pi/shape[1]*coords[:,1]), np.sin(np.pi/shape[0]*coords[:,0]), np.sin(np.pi/shape[1]*coords[:,1])])
 
-    #def enhance_coords(self, coords, shape):
-    #    return coords
+    def enhance_coords_direct(self, coords, shape):
+        return coords
 
-    def find_sklearn_registration(self, stars, stars1_matched, shape):
+    def find_sklearn_registration(self, stars, stars1_matched, shape, enhance_coords):
         model = sklearn.linear_model.RANSACRegressor(min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=1000)
-        model.fit(self.enhance_coords(stars, shape), stars1_matched)
-        self.logger.info(
-          f"Translation: ({model.estimator_.intercept_}), "
-          f"Coeffs: {model.estimator_.coef_}, "
-          f"Inliers: {np.count_nonzero(model.inlier_mask_)}/{len(model.inlier_mask_)}"
-          )
+        model.fit(enhance_coords(stars, shape), stars1_matched)
         def predict(coords):
-            return model.predict(self.enhance_coords(coords, shape))
+            return model.predict(enhance_coords(coords, shape))
         return predict
 
     #find_registration = find_skimage_registration
@@ -231,11 +225,14 @@ class AstroStack:
 
     def warp_imgs(self, imgs):
         middle = len(self.args.images) // 2
+        
+        enhance_coords = self.enhance_coords_partial
 
         register = self.hdf5.require_group("/register")
         stars = self.hdf5.require_group("/register/stars")
         graphs = self.hdf5.require_group("/register/graphs")
         grays = self.hdf5.require_group("/register/grays")
+        
         for i in trange(len(self.args.images), desc="Finding stars"):
             star = self.find_stars(imgs[i], self.args.images[i])
             stars.create_dataset(self.args.images[i], star.shape, dtype=star.dtype)[:] = star
@@ -243,35 +240,24 @@ class AstroStack:
             grays.create_dataset(self.args.images[i], gray.shape, dtype=gray.dtype)[:] = gray
         
         shape = grays[self.args.images[middle]].shape
-        
-        models_forward = []
+        warps = register.create_dataset("imgs", imgs.shape)
         for i in trange(middle, desc="Registering forward to middle"):
             stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             if stars_matched.shape[1] < 10:
                 stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
             graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
-            model = self.find_registration(stars_matched[0], stars_matched[1], shape)
-            models_forward.append(model)
+            model = self.find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
+            warps[i] = skimage.transform.warp(imgs[i], model)
 
-        models_backward = []
+        warps[middle] = imgs[middle]
+
         for i in trange(middle+1, len(self.args.images), desc="Registering backward to middle"):
             stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             if stars_matched.shape[1] < 10:
                 stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
             graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
-            model = self.find_registration(stars_matched[0], stars_matched[1], shape)
-            models_backward.append(model)
-
-        warps = register.create_dataset("imgs", imgs.shape)
-        for i in trange(middle, desc="Applying forward to middle"):
-            warp = skimage.transform.warp(imgs[i], models_forward[i])
-            warps[i] = warp
-
-        warps[middle] = imgs[middle]
-
-        for i in trange(len(models_backward), desc="Applying backward to middle"):
-            warp = skimage.transform.warp(imgs[middle+i+1], models_backward[i])
-            warps[middle + i] = warp
+            model = self.find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
+            warps[i] = skimage.transform.warp(imgs[i], model)
 
         return warps
 
@@ -305,7 +291,7 @@ class AstroStack:
         if self.args.average_output:
             data = []
             for i in trange(imgs.shape[1], desc="Sigma clipping channel"):
-                data.append(astropy.stats.sigma_clipped_stats(imgs[:,i,:,:].reshape(len(imgs), -1), axis=0))
+                data.append(astropy.stats.sigma_clipped_stats(imgs[:,i,:,:].reshape(len(imgs), -1), axis=0)[0])
             average = np.column_stack(data).reshape(imgs.shape[1:])
         
             self.logger.info(f"Saving pre stretch file {args.average_output}")
@@ -315,8 +301,11 @@ class AstroStack:
 
 if __name__ == "__main__":
     import argparse
+    import logging
     import os
     
+    np.seterr(divide='ignore', invalid='ignore')
+
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(description='Stack Astrophotography')
