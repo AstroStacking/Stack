@@ -330,7 +330,7 @@ class AstroStack:
             data = []
             for i in trange(imgs.shape[1], desc="Sigma clipping channel"):
                 data.append(astropy.stats.sigma_clipped_stats(imgs[:,i,:,:].reshape(len(imgs), -1), axis=0)[0])
-            average = np.column_stack(data).reshape(imgs.shape[1:])
+            average = np.row_stack(data).reshape(imgs.shape[1:])
         
             self.logger.info(f"Saving pre stretch file {args.average_output}")
             save(self.args.average_output, average)
