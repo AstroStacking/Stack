@@ -84,7 +84,7 @@ class AstroStack:
             thresh = skimage.filters.threshold_otsu(filtered_img)
             binary_img = filtered_img > thresh * thresh_fix
             labels = skimage.measure.label(binary_img, connectivity=2)
-            properties = skimage.measure.regionprops(labels)
+            properties = skimage.measure.regionprops(labels, intensity_image=gray_img)
             if len(properties) > self.args.max_stars:
                 thresh_fix = thresh_fix * 1.1
             elif len(properties) < self.args.min_stars:
@@ -169,12 +169,15 @@ class AstroStack:
         return [i for i, j in mainGraph], [j for i, j in mainGraph]
 
     def find_partial_graph_match(self, matchList, coords0, coords1):
+        originalSet = set(matchList[0])
         matchSet = set(matchList[1])
 
         fulldist0 = sp.spatial.distance_matrix(coords0, coords0)
         fulldist1 = sp.spatial.distance_matrix(coords1, coords1)
 
-        for i in trange(max(matchList[0]), len(coords0), desc="Partial graph match"):
+        for i in range(len(coords0)):
+            if i in originalSet:
+                continue
             best = 1
             bestTrial = []
             
@@ -192,12 +195,44 @@ class AstroStack:
             if best < 0.01:
                 matchList[0].append(bestTrial[0])
                 matchList[1].append(bestTrial[1])
+                originalSet.add(bestTrial[0])
                 matchSet.add(bestTrial[1])
 
         return matchList
 
+    def merge_matches(self, matchList0, matchList1, mapping0, mapping1):
+        matchList0[0].extend([mapping0[0][i] for i in matchList1[0]])
+        matchList0[1].extend([mapping1[0][i] for i in matchList1[1]])
+        return matchList0
+
     def match_locations(self, img, coords0, coords1, minFullGraph, filename):
-        matchList = self.find_full_graph_match(coords0, coords1, minFullGraph)
+        if self.args.quarters:
+            left0 = coords0[:,0] < img.shape[1]/2
+            right0 = coords0[:,0] >= img.shape[1]/2
+            top0 = coords0[:,1] < img.shape[0]/2
+            bottom0 = coords0[:,1] >= img.shape[0]/2
+            
+            left1 = coords1[:,0] < img.shape[1]/2
+            right1 = coords1[:,0] >= img.shape[1]/2
+            top1 = coords1[:,1] < img.shape[0]/2
+            bottom1 = coords1[:,1] >= img.shape[0]/2
+
+            matchList = [], []
+
+            topleft0 = np.where(np.logical_and(top0, left0))
+            topleft1 = np.where(np.logical_and(top1, left1))
+            matchList = self.merge_matches(matchList, self.find_full_graph_match(coords0[topleft0], coords1[topleft1], minFullGraph), topleft0, topleft1)
+            topright0 = np.where(np.logical_and(top0, right0))
+            topright1 = np.where(np.logical_and(top1, right1))
+            matchList = self.merge_matches(matchList, self.find_full_graph_match(coords0[topright0], coords1[topright1], minFullGraph), topright0, topright1)
+            bottomleft0 = np.where(np.logical_and(bottom0, left0))
+            bottomleft1 = np.where(np.logical_and(bottom1, left1))
+            matchList = self.merge_matches(matchList, self.find_full_graph_match(coords0[bottomleft0], coords1[bottomleft1], minFullGraph), bottomleft0, bottomleft1)
+            bottomright0 = np.where(np.logical_and(bottom0, right0))
+            bottomright1 = np.where(np.logical_and(bottom1, right1))
+            matchList = self.merge_matches(matchList, self.find_full_graph_match(coords0[bottomright0], coords1[bottomright1], minFullGraph), bottomright0, bottomright1)
+        else:
+            matchList = self.find_full_graph_match(coords0, coords1, minFullGraph)
         matchList = self.find_partial_graph_match(matchList, coords0, coords1)
 
         self.save_graph(img, coords1, matchList[1], coords0, matchList[0], filename)
@@ -229,7 +264,7 @@ class AstroStack:
     def warp_imgs(self, imgs):
         middle = len(self.args.images) // 2
         
-        enhance_coords = self.enhance_coords_partial
+        enhance_coords = self.enhance_coords_partial if self.args.barillet else self.enhance_coords_direct
 
         register = self.hdf5.require_group("/register")
         stars = self.hdf5.require_group("/register/stars")
@@ -325,6 +360,8 @@ if __name__ == "__main__":
     parser.add_argument('--min-stars', type=int, default=80)
     parser.add_argument('--max-stars', type=int, default=100)
     parser.add_argument('--full-graph', type=int, default=5)
+    parser.add_argument('--compensate-barillet', dest='barillet', action='store_true', help='Tries to compensate for barillet distortion')
+    parser.add_argument('--force-quarters', dest='quarters', action='store_true', help='Forces full graph match in each quarter of the image before propagation')
 
     parser.add_argument('--max-output', type=str, help='Output image name')
     parser.add_argument('--average-output', type=str, help='Output image name')
