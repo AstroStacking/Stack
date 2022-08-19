@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import math
+import itertools
 
 import numpy as np
 import scipy as sp
@@ -95,32 +96,14 @@ class AstroStack:
         data = np.array([property.centroid[::-1] for property in properties if property.axis_minor_length > 0 and property.axis_major_length / property.axis_minor_length < 5])
         return data
 
-    def generate_potential_match(self, nbElements, fullRange):
-        l = [0] * nbElements
-        while True:
-            inRange = False
-            for i in range(nbElements):
-                l[i] = l[i] + 1
-                if l[i] == fullRange:
-                    l[i] = 0
-                else:
-                    inRange = True
-                    break
-            if inRange:
-                yield l
-            else:
-                break
-
     def match_graph(self, coords0, coords1):
         dist0 = sp.spatial.distance_matrix(coords0, coords0)
         dist1 = sp.spatial.distance_matrix(coords1, coords1)
         best = 1
         bestTrial = []
         
-        for trial in self.generate_potential_match(len(coords0), len(coords1)):
-            if len(set(trial)) != len(coords0):
-                continue
-            d = dist1[trial]
+        for trial in itertools.permutations(list(range(len(coords1))), len(coords0)):
+            d = dist1[trial, :]
             d = d[:, trial]
             ratio = dist0 / d
             candidate = np.nanmax(np.abs(ratio-1))
@@ -128,7 +111,9 @@ class AstroStack:
                 best = candidate
                 bestTrial = [(i, j) for i, j in enumerate(trial)]
 
-        return bestTrial
+        if best < self.args.distance_ratio:
+            return bestTrial
+        return []
 
     def save_match(self, img, stars, stars_ref, match, filename):
         plt.figure(figsize=(6, 6))
@@ -162,11 +147,12 @@ class AstroStack:
         plt.close()
 
     def find_full_graph_match(self, coords0, coords1, minFullGraph):
-        for i in range(minFullGraph):
-            mainGraph = self.match_graph(coords0[i:i+minFullGraph], coords1[:minFullGraph*2])
-            if len(mainGraph) != 0:
-                break
-        return [i for i, j in mainGraph], [j for i, j in mainGraph]
+        for trial in itertools.permutations(list(range(minFullGraph+1)), minFullGraph):
+            mainGraph = self.match_graph(coords0[trial, :], coords1[:minFullGraph*2])
+            if len(mainGraph) > minFullGraph/2:
+                return [trial[i] for i, j in mainGraph], [j for i, j in mainGraph]
+                
+        return [], []
 
     def find_partial_graph_match(self, matchList, coords0, coords1):
         originalSet = set(matchList[0])
@@ -192,7 +178,7 @@ class AstroStack:
                     best = candidate
                     bestTrial = (i, j)
             
-            if best < 0.01:
+            if best < self.args.distance_ratio:
                 matchList[0].append(bestTrial[0])
                 matchList[1].append(bestTrial[1])
                 originalSet.add(bestTrial[0])
@@ -279,7 +265,7 @@ class AstroStack:
         
         shape = grays[self.args.images[middle]].shape
         warps = register.create_dataset("imgs", imgs.shape)
-        for i in trange(middle, desc="Registering forward to middle"):
+        for i in trange(middle, desc="Registering begin to middle"):
             stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             if stars_matched.shape[1] < 10:
                 stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
@@ -289,7 +275,7 @@ class AstroStack:
 
         warps[middle] = imgs[middle]
 
-        for i in trange(middle+1, len(self.args.images), desc="Registering backward to middle"):
+        for i in trange(middle+1, len(self.args.images), desc="Registering end to middle"):
             stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             if stars_matched.shape[1] < 10:
                 stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
@@ -360,6 +346,7 @@ if __name__ == "__main__":
     parser.add_argument('--min-stars', type=int, default=80)
     parser.add_argument('--max-stars', type=int, default=100)
     parser.add_argument('--full-graph', type=int, default=5)
+    parser.add_argument('--distance-ratio', type=float, default=.01, help='Target ratio to validate a match')
     parser.add_argument('--compensate-barillet', dest='barillet', action='store_true', help='Tries to compensate for barillet distortion')
     parser.add_argument('--force-quarters', dest='quarters', action='store_true', help='Forces full graph match in each quarter of the image before propagation')
 
