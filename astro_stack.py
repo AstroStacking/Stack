@@ -265,7 +265,7 @@ class AstroStack:
         
         shape = grays[self.args.images[middle]].shape
         warps = register.create_dataset("imgs", imgs.shape)
-        for i in trange(middle, desc="Registering begin to middle"):
+        for i in trange(middle-1, -1, -1, desc="Registering begin to middle"):
             stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
             if stars_matched.shape[1] < 10:
                 stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
