@@ -222,7 +222,7 @@ class AstroStack:
         matchList = self.find_partial_graph_match(matchList, coords0, coords1)
 
         self.save_graph(img, coords1, matchList[1], coords0, matchList[0], filename)
-        return np.array([[coords0[m] for m in matchList[0]], [coords1[m] for m in matchList[1]]])
+        return matchList
 
     def find_skimage_registration(self, stars, stars1_matched, shape, enhance_coords):
         model_robust, inliers = skimage.measure.ransac((stars, stars1_matched), skimage.transform.SimilarityTransform, min_samples=max(len(stars)//2, 10), residual_threshold=10, max_trials=100)
@@ -247,10 +247,25 @@ class AstroStack:
     #find_registration = find_skimage_registration
     find_registration = find_sklearn_registration
 
+    def propagate_graph(self, local_graph, graph):
+        l = []
+        for i in range(len(graph[0])):
+            pos = np.where(graph[1][i] == local_graph[0])
+            if len(pos[0]) > 0:
+                l.append((graph[0][i], local_graph[1][pos[0][0]]))
+        
+        return np.array(l).T
+
+
     def warp_imgs(self, imgs):
         middle = len(self.args.images) // 2
         
-        enhance_coords = self.enhance_coords_partial if self.args.barillet else self.enhance_coords_direct
+        if self.args.barillet == 'none':
+            enhance_coords = self.enhance_coords_direct
+        elif self.args.barillet == 'partial':
+            enhance_coords = self.enhance_coords_partial
+        elif self.args.barillet == 'full':
+            enhance_coords = self.enhance_coords_full
 
         register = self.hdf5.require_group("/register")
         stars = self.hdf5.require_group("/register/stars")
@@ -263,22 +278,26 @@ class AstroStack:
             gray = skimage.color.rgb2gray(imgs[i])
             grays.create_dataset(self.args.images[i], gray.shape, dtype=gray.dtype)[:] = gray
         
+        middle_graph = np.array((list(range(stars[self.args.images[middle]].shape[0])),) * 2)
         shape = grays[self.args.images[middle]].shape
         warps = register.create_dataset("imgs", imgs.shape)
+
+        graph = middle_graph
         for i in trange(middle-1, -1, -1, desc="Registering begin to middle"):
-            stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
-            if stars_matched.shape[1] < 10:
-                stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
-            graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
+            local_graph = self.match_locations(imgs[i], np.array(stars[self.args.images[i+1]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
+            graph = self.propagate_graph(local_graph, graph)
+            stars_matched = np.array([[stars[self.args.images[middle]][m] for m in graph[0]], [stars[self.args.images[i]][m] for m in graph[1]]])
+            graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=graph.dtype)[:] = stars_matched
             model = self.find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
             warps[i] = skimage.transform.warp(imgs[i], model)
 
         warps[middle] = imgs[middle]
 
+        graph = middle_graph
         for i in trange(middle+1, len(self.args.images), desc="Registering end to middle"):
-            stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
-            if stars_matched.shape[1] < 10:
-                stars_matched = self.match_locations(imgs[i], np.array(stars[self.args.images[middle]]), np.array(stars[self.args.images[i]]), self.args.full_graph-1, self.args.images[i])
+            local_graph = self.match_locations(imgs[i], np.array(stars[self.args.images[i-1]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
+            graph = self.propagate_graph(local_graph, graph)
+            stars_matched = np.array([[stars[self.args.images[middle]][m] for m in graph[0]], [stars[self.args.images[i]][m] for m in graph[1]]])
             graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
             model = self.find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
             warps[i] = skimage.transform.warp(imgs[i], model)
@@ -343,12 +362,12 @@ if __name__ == "__main__":
 
     parser.add_argument('--registration-output', type=str, help='Output image name')
     parser.add_argument('--no-register', dest='register', action='store_false')
-    parser.add_argument('--min-stars', type=int, default=80)
-    parser.add_argument('--max-stars', type=int, default=100)
-    parser.add_argument('--full-graph', type=int, default=5)
+    parser.add_argument('--min-stars', type=int, default=80, help='Minimum number of stars for find')
+    parser.add_argument('--max-stars', type=int, default=100, help='Maximum number of stars for find')
+    parser.add_argument('--full-graph', type=int, default=5, help='Number of vertices in the full graph match')
     parser.add_argument('--distance-ratio', type=float, default=.01, help='Target ratio to validate a match')
-    parser.add_argument('--compensate-barillet', dest='barillet', action='store_true', help='Tries to compensate for barillet distortion')
     parser.add_argument('--force-quarters', dest='quarters', action='store_true', help='Forces full graph match in each quarter of the image before propagation')
+    parser.add_argument('--compensate-barillet', dest='barillet', default='none', choices=['none', 'partial', 'full'], help='Tries to compensate for barillet distortion')
 
     parser.add_argument('--max-output', type=str, help='Output image name')
     parser.add_argument('--average-output', type=str, help='Output image name')
