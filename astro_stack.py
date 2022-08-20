@@ -74,7 +74,7 @@ class AstroStack:
                 
         return cleaned_imgs
 
-    def find_stars(self, img, filename):
+    def find_stars(self, img):
         """
         Find stars on an image and return an array of possible stars
         """
@@ -127,8 +127,8 @@ class AstroStack:
     
     def save_graph(self, img, stars, graph, stars_ref, graph_ref, filename):
         from scipy.spatial import KDTree
-        interesting_stars = stars[graph]
-        interesting_stars_ref = stars_ref[graph_ref]
+        interesting_stars = stars[sorted(graph)]
+        interesting_stars_ref = stars_ref[sorted(graph_ref)]
         tree = KDTree(interesting_stars)
         tree_ref = KDTree(interesting_stars_ref)
 
@@ -191,7 +191,7 @@ class AstroStack:
         matchList0[1].extend([mapping1[0][i] for i in matchList1[1]])
         return matchList0
 
-    def match_locations(self, img, coords0, coords1, minFullGraph, filename):
+    def match_locations(self, img, coords0, coords1, minFullGraph):
         if self.args.quarters:
             left0 = coords0[:,0] < img.shape[1]/2
             right0 = coords0[:,0] >= img.shape[1]/2
@@ -220,8 +220,6 @@ class AstroStack:
         else:
             matchList = self.find_full_graph_match(coords0, coords1, minFullGraph)
         matchList = self.find_partial_graph_match(matchList, coords0, coords1)
-
-        self.save_graph(img, coords1, matchList[1], coords0, matchList[0], filename)
         return matchList
 
     def find_skimage_registration(self, stars, stars1_matched, shape, enhance_coords):
@@ -244,8 +242,12 @@ class AstroStack:
             return model.predict(enhance_coords(coords, shape))
         return predict
 
-    #find_registration = find_skimage_registration
-    find_registration = find_sklearn_registration
+    def find_direct_registration(self, stars, stars1_matched, shape, enhance_coords):
+        model = sklearn.linear_model.LinearRegression()
+        model.fit(enhance_coords(stars, shape), stars1_matched)
+        def predict(coords):
+            return model.predict(enhance_coords(coords, shape))
+        return predict
 
     def propagate_graph(self, local_graph, graph):
         l = []
@@ -256,7 +258,6 @@ class AstroStack:
         
         return np.array(l).T
 
-
     def warp_imgs(self, imgs):
         middle = len(self.args.images) // 2
         
@@ -266,6 +267,12 @@ class AstroStack:
             enhance_coords = self.enhance_coords_partial
         elif self.args.barillet == 'full':
             enhance_coords = self.enhance_coords_full
+            
+        if self.args.optimise == 'ransac':
+            find_registration = self.find_sklearn_registration
+        elif self.args.optimise == 'direct':
+            find_registration = self.find_direct_registration
+
 
         register = self.hdf5.require_group("/register")
         stars = self.hdf5.require_group("/register/stars")
@@ -273,7 +280,7 @@ class AstroStack:
         grays = self.hdf5.require_group("/register/grays")
         
         for i in trange(len(self.args.images), desc="Finding stars"):
-            star = self.find_stars(imgs[i], self.args.images[i])
+            star = self.find_stars(imgs[i])
             stars.create_dataset(self.args.images[i], star.shape, dtype=star.dtype)[:] = star
             gray = skimage.color.rgb2gray(imgs[i])
             grays.create_dataset(self.args.images[i], gray.shape, dtype=gray.dtype)[:] = gray
@@ -284,22 +291,24 @@ class AstroStack:
 
         graph = middle_graph
         for i in trange(middle-1, -1, -1, desc="Registering begin to middle"):
-            local_graph = self.match_locations(imgs[i], np.array(stars[self.args.images[i+1]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
+            local_graph = self.match_locations(imgs[i], np.array(stars[self.args.images[i+1]]), np.array(stars[self.args.images[i]]), self.args.full_graph)
             graph = self.propagate_graph(local_graph, graph)
             stars_matched = np.array([[stars[self.args.images[middle]][m] for m in graph[0]], [stars[self.args.images[i]][m] for m in graph[1]]])
-            graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=graph.dtype)[:] = stars_matched
-            model = self.find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
+            self.save_graph(imgs[i], stars[self.args.images[i]], graph[1, :], stars[self.args.images[middle]], graph[0, :], self.args.images[i])
+            graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
+            model = find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
             warps[i] = skimage.transform.warp(imgs[i], model)
 
         warps[middle] = imgs[middle]
 
         graph = middle_graph
         for i in trange(middle+1, len(self.args.images), desc="Registering end to middle"):
-            local_graph = self.match_locations(imgs[i], np.array(stars[self.args.images[i-1]]), np.array(stars[self.args.images[i]]), self.args.full_graph, self.args.images[i])
+            local_graph = self.match_locations(imgs[i], np.array(stars[self.args.images[i-1]]), np.array(stars[self.args.images[i]]), self.args.full_graph)
             graph = self.propagate_graph(local_graph, graph)
             stars_matched = np.array([[stars[self.args.images[middle]][m] for m in graph[0]], [stars[self.args.images[i]][m] for m in graph[1]]])
+            self.save_graph(imgs[i], stars[self.args.images[i]], graph[1, :], stars[self.args.images[middle]], graph[0, :], self.args.images[i])
             graphs.create_dataset(self.args.images[i], stars_matched.shape, dtype=stars_matched.dtype)[:] = stars_matched
-            model = self.find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
+            model = find_registration(stars_matched[0], stars_matched[1], shape, enhance_coords)
             warps[i] = skimage.transform.warp(imgs[i], model)
 
         return warps
@@ -368,6 +377,7 @@ if __name__ == "__main__":
     parser.add_argument('--distance-ratio', type=float, default=.01, help='Target ratio to validate a match')
     parser.add_argument('--force-quarters', dest='quarters', action='store_true', help='Forces full graph match in each quarter of the image before propagation')
     parser.add_argument('--compensate-barillet', dest='barillet', default='none', choices=['none', 'partial', 'full'], help='Tries to compensate for barillet distortion')
+    parser.add_argument('--optimise', default='ransac', choices=['ransac', 'direct'], help='Optimisation procedure')
 
     parser.add_argument('--max-output', type=str, help='Output image name')
     parser.add_argument('--average-output', type=str, help='Output image name')
