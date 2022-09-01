@@ -12,9 +12,16 @@ import sklearn.linear_model
 import astropy.stats
 from matplotlib import pyplot as plt
 from tqdm.auto import trange
+from scipy.optimize import minimize
 
 def save(filename, data):
     skimage.io.imsave(filename, (data * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile', check_contrast=False)
+
+def predict_all(coords, angle, zoom, origin):
+    return (np.dot(coords - origin, np.array(((math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))))) + origin) * zoom
+
+def cost_all(graph0, graph1, angle, zoom, origin):
+    return np.sum((graph1 - predict_all(graph0, angle, zoom, origin)) ** 2)
 
 class AstroStack:
     def __init__(self, args):
@@ -243,6 +250,22 @@ class AstroStack:
         return predict
 
     def find_direct_registration(self, stars, stars1_matched, shape, enhance_coords):
+        model = sklearn.linear_model.LinearRegression()
+        model.fit(enhance_coords(stars, shape), stars1_matched)
+        def predict(coords):
+            return model.predict(enhance_coords(coords, shape))
+        return predict
+
+    def find_direct_registration(self, stars, stars1_matched, shape, enhance_coords):
+        def cost(X):
+            return cost_all(stars, stars1_matched, X[0], X[1], (X[2], X[3]))
+        
+        r = minimize(cost, (0, 1, 0, 0))
+        def predict(coords):
+            return predict_all(coords, r.x[0], r.x[1], (r.x[2], r.x[3]))
+        return predict
+        print(r.x)
+
         model = sklearn.linear_model.LinearRegression()
         model.fit(enhance_coords(stars, shape), stars1_matched)
         def predict(coords):
