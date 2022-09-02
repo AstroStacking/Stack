@@ -17,11 +17,24 @@ from scipy.optimize import minimize
 def save(filename, data):
     skimage.io.imsave(filename, (data * np.iinfo(np.uint16).max).astype(np.uint16), plugin='tifffile', check_contrast=False)
 
-def predict_all(coords, angle, zoom, origin):
-    return (np.dot(coords - origin, np.array(((math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))))) + origin) * zoom
+def transform(coords, focal):
+    #return np.tan(coords/ focal)
+    return coords
 
-def cost_all(graph0, graph1, angle, zoom, origin):
-    return np.sum((graph1 - predict_all(graph0, angle, zoom, origin)) ** 2)
+def predict_all(coords, angle, zoom, origin, focal=10000.):
+    return (np.dot(transform(coords, focal) - origin, np.array(((math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))))) + origin) * zoom
+
+def cost_all(graph0, graph1, angle, zoom, origin, focal=10000.):
+    return np.sum((predict_all(transform(graph0, focal), angle, zoom, origin) - transform(graph1, focal)) ** 2)
+
+def partial_gradient_angle(coords, angle, zoom, origin, focal=10000.):
+    return np.dot(transform(coords, focal) - origin, np.array(((-math.sin(angle), math.cos(angle)), (-math.cos(angle), -math.sin(angle))))) * zoom
+
+def partial_gradient_zoom(coords, angle, zoom, origin, focal=10000.):
+    return np.dot(transform(coords, focal) - origin, np.array(((math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))))) + origin
+    
+def partial_gradient_origin(coords, angle, zoom, origin, focal=10000.):
+    return np.array(((math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))))
 
 class AstroStack:
     def __init__(self, args):
@@ -256,20 +269,31 @@ class AstroStack:
             return model.predict(enhance_coords(coords, shape))
         return predict
 
-    def find_direct_registration(self, stars, stars1_matched, shape, enhance_coords):
+    def find_physical_registration(self, stars, stars1_matched, shape, enhance_coords):
+        stars = enhance_coords(stars, shape)
+        stars1_matched = enhance_coords(stars1_matched, shape)
         def cost(X):
             return cost_all(stars, stars1_matched, X[0], X[1], (X[2], X[3]))
-        
-        r = minimize(cost, (0, 1, 0, 0))
-        def predict(coords):
-            return predict_all(coords, r.x[0], r.x[1], (r.x[2], r.x[3]))
-        return predict
-        print(r.x)
+        def gradient(X):
+            angles = partial_gradient_angle(stars, X[0], X[1], np.array((X[2], X[3])))
+            zooms = partial_gradient_zoom(stars, X[0], X[1], np.array((X[2], X[3])))
+            origins = partial_gradient_origin(stars, X[0], X[1], np.array((X[2], X[3])))
+            
+            partial_gradient = np.zeros((4, *angles.shape))
+            partial_gradient[0] = angles
+            partial_gradient[1] = zooms
+            partial_gradient[2:] = -X[1] * origins[:, None, :]
+            partial_gradient[2,:,0] += X[1]
+            partial_gradient[3,:,1] += X[1]
+            grad = 2 * np.dot(partial_gradient.reshape(4, -1), (predict_all(stars, X[0], X[1], np.array((X[2], X[3]))) - stars1_matched).reshape(-1))
+            
+            return grad
 
-        model = sklearn.linear_model.LinearRegression()
-        model.fit(enhance_coords(stars, shape), stars1_matched)
+        r = minimize(cost, (0, 1, 0, 0), jac=gradient)
+        print(r.fun)
+        print(r.x)
         def predict(coords):
-            return model.predict(enhance_coords(coords, shape))
+            return predict_all(enhance_coords(coords, shape), r.x[0], r.x[1], (r.x[2], r.x[3]))
         return predict
 
     def propagate_graph(self, local_graph, graph):
@@ -295,6 +319,8 @@ class AstroStack:
             find_registration = self.find_sklearn_registration
         elif self.args.optimise == 'direct':
             find_registration = self.find_direct_registration
+        elif self.args.optimise == 'physical':
+            find_registration = find_physical_registration
 
 
         register = self.hdf5.require_group("/register")
@@ -400,7 +426,7 @@ if __name__ == "__main__":
     parser.add_argument('--distance-ratio', type=float, default=.01, help='Target ratio to validate a match')
     parser.add_argument('--force-quarters', dest='quarters', action='store_true', help='Forces full graph match in each quarter of the image before propagation')
     parser.add_argument('--compensate-barillet', dest='barillet', default='none', choices=['none', 'partial', 'full'], help='Tries to compensate for barillet distortion')
-    parser.add_argument('--optimise', default='ransac', choices=['ransac', 'direct'], help='Optimisation procedure')
+    parser.add_argument('--optimise', default='ransac', choices=['ransac', 'direct', 'physical'], help='Optimisation procedure')
 
     parser.add_argument('--max-output', type=str, help='Output image name')
     parser.add_argument('--average-output', type=str, help='Output image name')
